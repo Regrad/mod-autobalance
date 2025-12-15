@@ -403,7 +403,7 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                     if (thisPlayer->IsGameMaster())
                         continue;
 
-                    if (thisPlayer->IsWithinDist(creature, 500))
+                    if (thisPlayer->IsWithinDist(creature, static_cast<float>(distance)))
                     {
                         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) | is in range ({} world units) of player {} and is considered active.", creature->GetName(), creatureABInfo->UnmodifiedLevel, distance, thisPlayer->GetName());
                         isPlayerWithinDistance = true;
@@ -2404,6 +2404,9 @@ void UpdateMapPlayerStats(Map* map)
 
     uint8 oldPlayerCount         = mapABInfo->playerCount;
     uint8 oldAdjustedPlayerCount = mapABInfo->adjustedPlayerCount;
+    uint8 oldHighestPlayerLevel  = mapABInfo->highestPlayerLevel;
+    uint8 oldLowestPlayerLevel   = mapABInfo->lowestPlayerLevel;
+
 
     LOG_DEBUG("module.AutoBalance", "AutoBalance::UpdateMapPlayerStats: Map {} ({}{}) | oldPlayerCount = ({}), oldAdjustedPlayerCount = ({}).",
         instanceMap->GetMapName(),
@@ -2579,6 +2582,23 @@ void UpdateMapPlayerStats(Map* map)
             mapABInfo->lowestPlayerLevel,
             mapABInfo->highestPlayerLevel,
             mapABInfo->adjustedPlayerCount);
+    }
+
+    // If the player level range changed, schedule this map for a reconfiguration.
+    // This helps ensure creatures get re-scaled after long disconnects / logins where map enter hooks may not run.
+    if (oldHighestPlayerLevel != mapABInfo->highestPlayerLevel || oldLowestPlayerLevel != mapABInfo->lowestPlayerLevel)
+    {
+        mapABInfo->mapConfigTime = 1;
+
+        LOG_DEBUG("module.AutoBalance", "AutoBalance::UpdateMapPlayerStats: Map {} ({}{}) | Player level range changes ({}-{} -> {}-{}). Force map update. mapConfigTime set to ({}).",
+            instanceMap->GetMapName(),
+            instanceMap->GetId(),
+            instanceMap->GetInstanceId() ? "-" + std::to_string(instanceMap->GetInstanceId()) : "",
+            oldLowestPlayerLevel,
+            oldHighestPlayerLevel,
+            mapABInfo->lowestPlayerLevel,
+            mapABInfo->highestPlayerLevel,
+            mapABInfo->mapConfigTime);
     }
 }
 
