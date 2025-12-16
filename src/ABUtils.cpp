@@ -14,35 +14,70 @@
 
 #include <chrono>
 #include <sstream>
+#include <algorithm>
+#include <unordered_set>
+
+namespace
+{
+    // Prune the cached map player list so it never contains stale Player* pointers.
+    // This prevents crashes when players/bots are deleted without a matching RemovePlayerFromMap call.
+    static void PruneMapPlayerList(Map* map, AutoBalanceMapInfo* mapABInfo)
+    {
+        if (!map || !mapABInfo || mapABInfo->allMapPlayers.empty())
+            return;
+
+        std::unordered_set<Player*> livePlayers;
+
+        Map::PlayerList const& playerList = map->GetPlayers();
+        for (Map::PlayerList::const_iterator itr = playerList.begin(); itr != playerList.end(); ++itr)
+        {
+            Player* p = itr->GetSource();
+            if (p && p->IsInWorld() && !p->IsGameMaster())
+                livePlayers.insert(p);
+        }
+
+        std::vector<Player*> pruned;
+        pruned.reserve(mapABInfo->allMapPlayers.size());
+
+        // IMPORTANT: never dereference pointers from the cached list - they may be stale.
+        for (Player* p : mapABInfo->allMapPlayers)
+        {
+            if (p && livePlayers.find(p) != livePlayers.end())
+                pruned.push_back(p);
+        }
+
+        mapABInfo->allMapPlayers.swap(pruned);
+    }
+} // namespace
 
 void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bool forceRecalculation)
 {
-    //
+
     // Make sure we have a creature and that it's assigned to a map
-    //
+
 
     if (!creature || !creature->GetMap())
         return;
 
-    //
+
     // If this isn't a dungeon, skip
-    //
+
 
     if (!(creature->GetMap()->IsDungeon()))
         return;
 
-    //
+
     // Get AutoBalance data
-    //
+
 
     Map*                     map            = creature->GetMap();
     InstanceMap*             instanceMap    = map->ToInstanceMap();
     AutoBalanceMapInfo*      mapABInfo      = GetMapInfo(instanceMap);
     AutoBalanceCreatureInfo* creatureABInfo = creature->CustomData.GetDefault<AutoBalanceCreatureInfo>("AutoBalanceCreatureInfo");
 
-    //
+
     // Handle summoned creatures
-    //
+
 
     if (creature->IsSummon())
     {
@@ -78,18 +113,18 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                     summoner->GetName(),
                     summonerABInfo->UnmodifiedLevel);
 
-                //
+
                 // If the creature or its summoner is a trigger
-                //
+
                 if (creature->IsTrigger() || summoner->IsTrigger())
                 {
                     LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) (summon) | or their summoner is a trigger.",
                         creature->GetName(),
                         creatureABInfo->UnmodifiedLevel);
 
-                    //
+
                     // If the creature is within the expected level range, allow scaling
-                    //
+
 
                     if ((creatureABInfo->UnmodifiedLevel >= (uint8)(((float)mapABInfo->lfgMinLevel * .85f) + 0.5f)) &&
                         (creatureABInfo->UnmodifiedLevel <= (uint8)(((float)mapABInfo->lfgMaxLevel * 1.15f) + 0.5f)))
@@ -111,14 +146,14 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                             (uint8)(((float)mapABInfo->lfgMaxLevel * 1.15f) + 0.5f));
                     }
                 }
-                //
+
                 // If the creature is not a trigger, match the summoner's level
-                //
+
                 else
                 {
-                    //
+
                     // Match the summoner's level
-                    //
+
                     creatureABInfo->UnmodifiedLevel = summonerABInfo->UnmodifiedLevel;
 
                     LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) (summon) | original level will match summoner's level ({}).",
@@ -129,18 +164,18 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 }
             }
         }
-        //
+
         // Summoned by a player
-        //
+
         else if(creature->ToTempSummon() &&
                 creature->ToTempSummon()->GetSummoner() &&
                 creature->ToTempSummon()->GetSummoner()->ToPlayer())
         {
             Player* summoner = creature->ToTempSummon()->GetSummoner()->ToPlayer();
 
-            //
+
             // Is this creature relevant?
-            //
+
 
             if (isCreatureRelevant(creature))
             {
@@ -151,9 +186,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                     summoner->GetLevel(),
                     creatureABInfo->UnmodifiedLevel);
             }
-            //
+
             // Summon is not relevant
-            //
+
             else
             {
                 uint8 newLevel = std::min(summoner->GetLevel(), creature->GetCreatureTemplate()->maxlevel);
@@ -169,9 +204,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 creatureABInfo->UnmodifiedLevel = newLevel;
             }
         }
-        //
+
         // Pets and totems
-        //
+
         else if (creature->IsCreatedByPlayer() || creature->IsPet() || creature->IsHunterPet() || creature->IsTotem())
         {
             LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) (summon) | is a {}. Original level set to ({}).",
@@ -188,22 +223,22 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 creatureABInfo->UnmodifiedLevel);
         }
 
-        //
+
         // if this is a summon, we shouldn't track it in any list and it does not contribute to the average level
-        //
+
 
         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) (summon) | will not affect the map's stats.", creature->GetName(), creatureABInfo->UnmodifiedLevel);
         return;
     }
-    //
+
     // Handle "special" creatures
-    //
+
     else if (creature->IsCritter() || creature->IsTotem() || creature->IsTrigger())
     {
-        //
+
         // If this is an intentionally-low-level creature (below 85% of the minimum LFG level), leave it where it is
         // If this is an intentionally-high-level creature (above 125% of the maximum LFG level), leave it where it is
-        //
+
         if ((creatureABInfo->UnmodifiedLevel < (uint8)(((float)mapABInfo->lfgMinLevel * .85f) + 0.5f)) ||
             (creatureABInfo->UnmodifiedLevel > (uint8)(((float)mapABInfo->lfgMaxLevel * 1.15f) + 0.5f)))
         {
@@ -217,9 +252,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 (uint8)(((float)mapABInfo->lfgMaxLevel * 1.15f) + 0.5f),
                 creatureABInfo->UnmodifiedLevel);
         }
-        //
+
         // Otherwise, set it to the target level of the instance so it will get scaled properly
-        //
+
         else
         {
             creatureABInfo->UnmodifiedLevel = mapABInfo->lfgTargetLevel;
@@ -233,9 +268,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 creatureABInfo->UnmodifiedLevel);
         }
     }
-    //
+
     // Creature isn't a summon, just store their unmodified level
-    //
+
     else
     {
         creatureABInfo->UnmodifiedLevel = creatureABInfo->UnmodifiedLevel;
@@ -246,18 +281,18 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
             creatureABInfo->UnmodifiedLevel);
     }
 
-    //
+
     // If this is a creature controlled by the player, skip for stats
-    //
+
     if (((creature->IsHunterPet() || creature->IsPet() || creature->IsSummon()) && creature->IsControlledByPlayer()))
     {
         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) | is controlled by the player and will not affect the map's stats.", creature->GetName(), creatureABInfo->UnmodifiedLevel);
         return;
     }
 
-    //
+
     // If this is a non-relevant creature, skip for stats
-    //
+
 
     if (creature->IsCritter() || creature->IsTotem() || creature->IsTrigger())
     {
@@ -268,9 +303,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         return;
     }
 
-    //
+
     // If the creature level is below 85% of the minimum LFG level, assume it's a flavor creature and shouldn't be tracked
-    //
+
 
     if (creatureABInfo->UnmodifiedLevel < (uint8)(((float)mapABInfo->lfgMinLevel * 0.85f) + 0.5f))
     {
@@ -278,9 +313,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         return;
     }
 
-    //
+
     // If the creature level is above 125% of the maximum LFG level, assume it's a flavor creature or holiday boss and shouldn't be tracked
-    //
+
 
     if (creatureABInfo->UnmodifiedLevel > (uint8)(((float)mapABInfo->lfgMaxLevel * 1.15f) + 0.5f))
     {
@@ -288,15 +323,15 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         return;
     }
 
-    //
+
     // Is this creature already in the map's creature list?
-    //
+
 
     bool isCreatureAlreadyInCreatureList = creatureABInfo->isInCreatureList;
 
-    //
+
     // Add the creature to the map's creature list if configured to do so
-    //
+
     if (addToCreatureList && !isCreatureAlreadyInCreatureList)
     {
         mapABInfo->allMapCreatures.push_back(creature);
@@ -305,16 +340,16 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) | is #{} in the creature list.", creature->GetName(), creatureABInfo->UnmodifiedLevel, mapABInfo->allMapCreatures.size());
     }
 
-    //
+
     // Alter stats for the map if needed
-    //
+
 
     bool isIncludedInMapStats = true;
 
-    //
+
     // If this creature was already in the creature list, don't consider it for map stats (again)
     // exception for if forceRecalculation is true (used on player enter/exit to recalculate map stats)
-    //
+
 
     if (isCreatureAlreadyInCreatureList && !forceRecalculation)
     {
@@ -329,15 +364,15 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         return;
     }
 
-    //
+
     // Only do these additional checks if we still think they need to be applied to the map stats
-    //
+
 
     if (isIncludedInMapStats)
     {
-        //
+
         // If the creature is vendor, trainer, or has gossip, don't use it to update map stats
-        //
+
         if ((creature->IsVendor() ||
             creature->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP) ||
             creature->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER) ||
@@ -354,23 +389,23 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
         }
         else
         {
-            //
+
             // If the creature is friendly to a player, don't use it to update map stats
-            //
+
             for (std::vector<Player*>::const_iterator playerIterator = mapABInfo->allMapPlayers.begin(); playerIterator != mapABInfo->allMapPlayers.end(); ++playerIterator)
             {
                 Player* thisPlayer = *playerIterator;
 
-                //
+
                 // If this player is a Game Master, skip
-                //
+
 
                 if (thisPlayer->IsGameMaster())
                     continue;
 
-                //
+
                 // If the creature is friendly and not a boss
-                //
+
 
                 if (creature->IsFriendlyTo(thisPlayer) && !isBossOrBossSummon(creature))
                 {
@@ -384,9 +419,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 }
             }
 
-            //
+
             // Perform the distance check if an override is configured for this map
-            //
+
             if (hasLevelScalingDistanceCheckOverride(instanceMap->GetId()))
             {
                 uint32 distance = levelScalingDistanceCheckOverrides[instanceMap->GetId()];
@@ -396,9 +431,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                 {
                     Player* thisPlayer = *playerIterator;
 
-                    //
+
                     // If this player is a Game Master, skip
-                    //
+
 
                     if (thisPlayer->IsGameMaster())
                         continue;
@@ -419,9 +454,9 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
                     }
                 }
 
-                //
+
                 // If no players were within the distance, don't include this creature in the map stats
-                //
+
 
                 if (!isPlayerWithinDistance)
                     isIncludedInMapStats = false;
@@ -431,24 +466,24 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
 
     if (isIncludedInMapStats)
     {
-        //
+
         // Mark this creature as being considered in the map stats
-        //
+
 
         creatureABInfo->isActive = true;
 
-        //
+
         // Update the highest and lowest creature levels
-        //
+
 
         if (creatureABInfo->UnmodifiedLevel > mapABInfo->highestCreatureLevel || mapABInfo->highestCreatureLevel == 0)
             mapABInfo->highestCreatureLevel = creatureABInfo->UnmodifiedLevel;
         if (creatureABInfo->UnmodifiedLevel < mapABInfo->lowestCreatureLevel || mapABInfo->lowestCreatureLevel == 0)
             mapABInfo->lowestCreatureLevel = creatureABInfo->UnmodifiedLevel;
 
-        //
+
         // Calculate the new average creature level
-        //
+
 
         float creatureCount = mapABInfo->activeCreatureCount;
         float oldAvgCreatureLevel = mapABInfo->avgCreatureLevel;
@@ -456,17 +491,17 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
 
         mapABInfo->avgCreatureLevel = newAvgCreatureLevel;
 
-        //
+
         // Increment the active creature counter
-        //
+
 
         mapABInfo->activeCreatureCount++;
 
         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddCreatureToMapCreatureList: Creature {} ({}) | is included in map stats (active), adjusting avgCreatureLevel to ({})", creature->GetName(), creatureABInfo->UnmodifiedLevel, newAvgCreatureLevel);
 
-        //
+
         // If the average creature level transitions from one whole number to the next, reset the map's config time so it will refresh
-        //
+
 
         if (round(oldAvgCreatureLevel) != round(newAvgCreatureLevel))
         {
@@ -490,15 +525,15 @@ void AddCreatureToMapCreatureList(Creature* creature, bool addToCreatureList, bo
 
 void RemoveCreatureFromMapData(Creature* creature)
 {
-    //
+
     // Get map data
-    //
+
 
     AutoBalanceMapInfo *mapABInfo = GetMapInfo(creature->GetMap());
 
-    //
+
     // If the creature is in the all creature list, remove it
-    //
+
 
     if (mapABInfo->allMapCreatures.size() > 0)
     {
@@ -509,16 +544,16 @@ void RemoveCreatureFromMapData(Creature* creature)
                 LOG_DEBUG("module.AutoBalance", "AutoBalance::RemoveCreatureFromMapData: Creature {} ({}) | is in the creature list and will be removed. There are {} creatures left.", creature->GetName(), creature->GetLevel(), mapABInfo->allMapCreatures.size() - 1);
                 mapABInfo->allMapCreatures.erase(creatureIteration);
 
-                //
+
                 // Mark this creature as removed
-                //
+
 
                 AutoBalanceCreatureInfo *creatureABInfo = creature->CustomData.GetDefault<AutoBalanceCreatureInfo>("AutoBalanceCreatureInfo");
                 creatureABInfo->isInCreatureList = false;
 
-                //
+
                 // Decrement the active creature counter if they were considered active
-                //
+
 
                 if (creatureABInfo->isActive)
                 {
@@ -618,35 +653,35 @@ float getDefaultMultiplier(Map* map, AutoBalanceInflectionPointSettings inflecti
     // You can visually see the effects of this function by using this spreadsheet:
     // https://docs.google.com/spreadsheets/d/100cmKIJIjCZ-ncWd0K9ykO8KUgwFTcwg4h2nfE_UeCc/copy
 
-    //
+
     // Get the max player count for the map
-    //
+
     uint32 maxNumberOfPlayers = map->ToInstanceMap()->GetMaxPlayers();
 
-    //
+
     // Get the adjustedPlayerCount for this instance
-    //
+
     AutoBalanceMapInfo *mapABInfo = GetMapInfo(map);
     float adjustedPlayerCount     = mapABInfo->adjustedPlayerCount;
 
-    //
+
     // #maththings
-    //
+
     float diff = ((float)maxNumberOfPlayers/5)*1.5f;
 
-    //
+
     // For math reasons that I do not understand, curveCeiling needs to be adjusted to bring the actual multiplier
     // closer to the curveCeiling setting. Create an adjustment based on how much the ceiling should be changed at
     // the max players multiplier.
-    //
+
     float curveCeilingAdjustment =
         inflectionPointSettings.curveCeiling /
         (((tanh(((float)maxNumberOfPlayers - inflectionPointSettings.value) / diff) + 1.0f) / 2.0f) *
         (inflectionPointSettings.curveCeiling - inflectionPointSettings.curveFloor) + inflectionPointSettings.curveFloor);
 
-    //
+
     // Adjust the multiplier based on the configured floor and ceiling values, plus the ceiling adjustment we just calculated
-    //
+
     float defaultMultiplier =
         ((tanh((adjustedPlayerCount - inflectionPointSettings.value) / diff) + 1.0f) / 2.0f) *
         (inflectionPointSettings.curveCeiling * curveCeilingAdjustment - inflectionPointSettings.curveFloor) +
@@ -667,63 +702,63 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
 {
     World_Multipliers worldMultipliers;
 
-    //
+
     // null check
-    //
+
 
     if (!map)
         return worldMultipliers;
 
-    //
+
     // If this isn't a dungeon, return defaults
-    //
+
 
     if (!(map->IsDungeon()))
         return worldMultipliers;
 
-    //
+
     // Grab map data
-    //
+
     AutoBalanceMapInfo *mapABInfo = GetMapInfo(map);
 
-    //
+
     // If the map isn't enabled, return defaults
-    //
+
 
     if (!mapABInfo->enabled)
         return worldMultipliers;
 
-    //
+
     // If there are no players on the map, return defaults
-    //
+
 
     if (mapABInfo->allMapPlayers.size() == 0)
         return worldMultipliers;
 
-    //
+
     // If creatures haven't been counted yet, return defaults
-    //
+
 
     if (mapABInfo->avgCreatureLevel == 0)
         return worldMultipliers;
 
-    //
+
     // Create some data variables
-    //
+
 
     InstanceMap* instanceMap      = map->ToInstanceMap();
     uint8 avgCreatureLevelRounded = (uint8)(mapABInfo->avgCreatureLevel + 0.5f);
 
-    //
+
     // Get the inflection point settings for this map
-    //
+
 
     AutoBalanceInflectionPointSettings inflectionPointSettings = getInflectionPointSettings(instanceMap);
 
-    //
+
     // Generate the default multiplier before level scaling
     // This value is only based on the adjusted number of players in the instance
-    //
+
 
     float worldMultiplier   = 1.0f;
     float defaultMultiplier = getDefaultMultiplier(map, inflectionPointSettings);
@@ -736,9 +771,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
         defaultMultiplier
     );
 
-    //
+
     // Multiply by the appropriate stat modifiers
-    //
+
     AutoBalanceStatModifiers statModifiers = getStatModifiers(map);
 
     if (baseValueType == BaseValueType::AUTOBALANCE_HEALTH) // health
@@ -758,9 +793,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
         baseValueType == BaseValueType::AUTOBALANCE_HEALTH ? statModifiers.health : statModifiers.damage
     );
 
-    //
+
     // Store the unscaled multiplier
-    //
+
     worldMultipliers.unscaled = worldMultiplier;
 
     LOG_DEBUG("module.AutoBalance", "AutoBalance::getWorldMultiplier: Map {} ({}) {} | multiplier before level scaling = ({}).",
@@ -770,9 +805,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
             worldMultiplier
     );
 
-    //
+
     // Only scale based on level if level scaling is enabled and the instance's average creature level is not within the skip range
-    //
+
 
     if (LevelScaling &&
             (
@@ -790,16 +825,16 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
             mapABInfo->worldMultiplierTargetLevel
         );
 
-        //
+
         // Use creature base stats to determine how to level scale the multiplier (the map is a warrior!)
-        //
+
 
         CreatureBaseStats const* origMapBaseStats     = sObjectMgr->GetCreatureBaseStats(avgCreatureLevelRounded, Classes::CLASS_WARRIOR);
         CreatureBaseStats const* adjustedMapBaseStats = sObjectMgr->GetCreatureBaseStats(mapABInfo->worldMultiplierTargetLevel, Classes::CLASS_WARRIOR);
 
-        //
+
         // Original Base Value
-        //
+
 
         float originalBaseValue;
 
@@ -825,9 +860,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
             originalBaseValue
         );
 
-        //
+
         // New Base Value
-        //
+
 
         float newBaseValue;
 
@@ -854,9 +889,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
             newBaseValue
         );
 
-        //
+
         // Update the world multiplier accordingly
-        //
+
 
         worldMultiplier *= newBaseValue / originalBaseValue;
 
@@ -883,9 +918,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
     {
         mapABInfo->worldMultiplierTargetLevel = avgCreatureLevelRounded;
 
-        //
+
         // Level scaling is disabled
-        //
+
 
         if (!LevelScaling)
         {
@@ -895,9 +930,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
                 mapABInfo->worldMultiplierTargetLevel
             );
         }
-        //
+
         // Inside the level skip range
-        //
+
         else
         {
             LOG_DEBUG("module.AutoBalance", "AutoBalance::getWorldMultiplier: Map {} ({}) | not level scaled due to being inside the level skip range. World multiplier target level set to avgCreatureLevel ({}).",
@@ -915,9 +950,9 @@ World_Multipliers getWorldMultiplier(Map* map, BaseValueType baseValueType)
         );
     }
 
-    //
+
     // Store the (potentially) level-scaled multiplier
-    //
+
 
     worldMultipliers.scaled = worldMultiplier;
 
@@ -933,9 +968,9 @@ AutoBalanceInflectionPointSettings getInflectionPointSettings (InstanceMap* inst
     float  curveFloor;
     float  curveCeiling;
 
-    //
+
     // Base Inflection Point
-    //
+
 
     if (instanceMap->IsHeroic())
     {
@@ -1010,17 +1045,17 @@ AutoBalanceInflectionPointSettings getInflectionPointSettings (InstanceMap* inst
         }
     }
 
-    //
+
     // Per map ID overrides alter the above settings, if set
-    //
+
 
     if (hasDungeonOverride(mapId))
     {
         AutoBalanceInflectionPointSettings* myInflectionPointOverrides = &dungeonOverrides[mapId];
 
-        //
+
         // Alter the inflectionValue according to the override, if set
-        //
+
 
         if (myInflectionPointOverrides->value != -1)
         {
@@ -1034,9 +1069,9 @@ AutoBalanceInflectionPointSettings getInflectionPointSettings (InstanceMap* inst
             curveCeiling = myInflectionPointOverrides->curveCeiling;
     }
 
-    //
+
     // Boss Inflection Point
-    //
+
 
     if (isBoss) {
 
@@ -1071,28 +1106,28 @@ AutoBalanceInflectionPointSettings getInflectionPointSettings (InstanceMap* inst
                 bossInflectionPointMultiplier = InflectionPointRaidBoss;
         }
 
-        //
+
         // Per map ID overrides alter the above settings, if set
-        //
+
 
         if (hasBossOverride(mapId))
         {
             AutoBalanceInflectionPointSettings* myBossOverrides = &bossOverrides[mapId];
 
-            //
+
             // If set, alter the inflectionValue according to the override
-            //
+
             if (myBossOverrides->value != -1)
                 inflectionValue *= myBossOverrides->value;
-            //
+
             // Otherwise, calculate using the value determined by instance type
-            //
+
             else
                 inflectionValue *= bossInflectionPointMultiplier;
         }
-        //
+
         // No override, use the value determined by the instance type
-        //
+
         else
             inflectionValue *= bossInflectionPointMultiplier;
     }
@@ -1132,37 +1167,37 @@ void getStatModifiersDebug(Map *map, Creature *creature, std::string message)
 
 AutoBalanceStatModifiers getStatModifiers (Map* map, Creature* creature)
 {
-    //
+
     // get the instance's InstanceMap
-    //
+
 
     InstanceMap* instanceMap  = map->ToInstanceMap();
 
-    //
+
     // map variables
-    //
+
 
     uint32 maxNumberOfPlayers = instanceMap->GetMaxPlayers();
     uint32 mapId              = map->GetId();
 
-    //
+
     // get the creature's info if a creature was specified
-    //
+
     AutoBalanceCreatureInfo* creatureABInfo = nullptr;
 
     if (creature)
         creatureABInfo = creature->CustomData.GetDefault<AutoBalanceCreatureInfo>("AutoBalanceCreatureInfo");
 
-    //
+
     // this will be the return value
-    //
+
 
     AutoBalanceStatModifiers statModifiers;
 
-    //
+
     // Apply the per-instance-type modifiers first
     // AutoBalance.StatModifier*(.Boss).<stat>
-    //
+
 
     if (instanceMap->IsHeroic()) // heroic
     {
@@ -1446,10 +1481,10 @@ AutoBalanceStatModifiers getStatModifiers (Map* map, Creature* creature)
         }
     }
 
-    //
+
     // Per-Map Overrides
     // AutoBalance.StatModifier.Boss.PerInstance
-    //
+
 
     if (creature && isBossOrBossSummon(creature) && hasStatModifierBossOverride(mapId))
     {
@@ -1475,9 +1510,9 @@ AutoBalanceStatModifiers getStatModifiers (Map* map, Creature* creature)
 
         getStatModifiersDebug(map, creature, "Boss Per-Instance Override");
     }
-    //
+
     // AutoBalance.StatModifier.PerInstance
-    //
+
     else if (hasStatModifierOverride(mapId))
     {
         AutoBalanceStatModifiers* myStatModifierOverrides = &statModifierOverrides[mapId];
@@ -1503,10 +1538,10 @@ AutoBalanceStatModifiers getStatModifiers (Map* map, Creature* creature)
         getStatModifiersDebug(map, creature, "Per-Instance Override");
     }
 
-    //
+
     // Per-creature modifiers applied last
     // AutoBalance.StatModifier.PerCreature
-    //
+
     if (creature && hasStatModifierCreatureOverride(creature->GetEntry()))
     {
         AutoBalanceStatModifiers* myCreatureOverrides = &statModifierCreatureOverrides[creature->GetEntry()];
@@ -1870,7 +1905,7 @@ bool isDungeonInMinPlayerMap(uint32 dungeonId, bool isHeroic)
 }
 
 // Used for reading the string from the configuration file to for those creatures who need to be scaled for XX number of players.
-//
+
 void LoadForcedCreatureIdsFromString(std::string creatureIds, int forcedPlayerCount)
 {
     std::string       delimitedValue;
@@ -1888,7 +1923,7 @@ void LoadForcedCreatureIdsFromString(std::string creatureIds, int forcedPlayerCo
 }
 
 // Used for reading the string from the configuration file for selectively disabling dungeons
-//
+
 std::list<uint32> LoadDisabledDungeons(std::string dungeonIdString)
 {
     std::string       delimitedValue;
@@ -1898,7 +1933,7 @@ std::list<uint32> LoadDisabledDungeons(std::string dungeonIdString)
     dungeonIdStream.str(dungeonIdString);
 
     // Process each dungeon ID in the string, delimited by the comma - ","
-    //
+
     while (std::getline(dungeonIdStream, delimitedValue, ',')) 
     {
         std::string       valueOne;
@@ -1923,7 +1958,7 @@ std::map<uint32, uint32> LoadDistanceCheckOverrides(std::string dungeonIdString)
     dungeonIdStream.str(dungeonIdString);
 
     // Process each dungeon ID in the string, delimited by the comma - "," and then space " "
-    //
+
     while (std::getline(dungeonIdStream, delimitedValue, ',')) 
     {
         std::string       val1;
@@ -1941,7 +1976,7 @@ std::map<uint32, uint32> LoadDistanceCheckOverrides(std::string dungeonIdString)
 
 
 // Used for reading the string from the configuration file for per-dungeon dynamic level overrides
-//
+
 std::map<uint8, AutoBalanceLevelScalingDynamicLevelSettings> LoadDynamicLevelOverrides(std::string dungeonIdString)
 {
     std::string       delimitedValue;
@@ -1952,7 +1987,7 @@ std::map<uint8, AutoBalanceLevelScalingDynamicLevelSettings> LoadDynamicLevelOve
     dungeonIdStream.str(dungeonIdString);
 
     // Process each dungeon ID in the string, delimited by the comma - "," and then space " "
-    //
+
     while (std::getline(dungeonIdStream, delimitedValue, ','))
     {
         std::string       val1;
@@ -1990,7 +2025,7 @@ std::map<uint8, AutoBalanceLevelScalingDynamicLevelSettings> LoadDynamicLevelOve
 
 
 // Used for reading the string from the configuration file for selecting dungeons to override
-//
+
 std::map<uint32, AutoBalanceInflectionPointSettings> LoadInflectionPointOverrides(std::string dungeonIdString)
 {
     std::string       delimitedValue;
@@ -2033,15 +2068,15 @@ std::map<uint32, AutoBalanceInflectionPointSettings> LoadInflectionPointOverride
 
 void LoadMapSettings(Map* map)
 {
-    //
+
     // Load (or create) the map's info
-    //
+
 
     AutoBalanceMapInfo* mapABInfo = GetMapInfo(map);
 
-    //
+
     // Create an InstanceMap object
-    //
+
 
     InstanceMap* instanceMap = map->ToInstanceMap();
 
@@ -2053,9 +2088,9 @@ void LoadMapSettings(Map* map)
         instanceMap->IsHeroic() ? "Heroic" : "Normal"
     );
 
-    //
+
     // Determine the minumum player count
-    //
+
 
     if (isDungeonInMinPlayerMap(map->GetId(), instanceMap->IsHeroic()))
         mapABInfo->minPlayers = instanceMap->IsHeroic() ? minPlayersPerHeroicDungeonIdMap[map->GetId()] : minPlayersPerDungeonIdMap[map->GetId()];
@@ -2068,9 +2103,9 @@ void LoadMapSettings(Map* map)
     else
         mapABInfo->minPlayers = minPlayersRaidHeroic;
 
-    //
+
     // If the minPlayers value we determined is less than the max number of players in this map, adjust down
-    //
+
     if (mapABInfo->minPlayers > instanceMap->GetMaxPlayers())
     {
         LOG_WARN("module.AutoBalance", "AutoBalance::LoadMapSettings: Your settings tried to set a minimum player count of {} which is greater than {}'s max player count of {}. Adjusting down.",
@@ -2091,9 +2126,9 @@ void LoadMapSettings(Map* map)
         mapABInfo->minPlayers
     );
 
-    //
+
     // Dynamic Level Scaling Floor and Ceiling
-    //
+
 
     // 5-player normal dungeons
     if (instanceMap->GetMaxPlayers() <= 5 && !instanceMap->IsHeroic())
@@ -2136,17 +2171,17 @@ void LoadMapSettings(Map* map)
 
     }
 
-    //
+
     // Level Scaling Skip Levels
-    //
+
 
     // Load the global settings into the map
     mapABInfo->levelScalingSkipHigherLevels = LevelScalingSkipHigherLevels;
     mapABInfo->levelScalingSkipLowerLevels  = LevelScalingSkipLowerLevels;
 
-    //
+
     // Per-instance overrides, if applicable
-    //
+
 
     if (hasDynamicLevelOverride(map->GetId()))
     {
@@ -2171,7 +2206,7 @@ void LoadMapSettings(Map* map)
 }
 
 // Used for reading the string from the configuration file for per-dungeon minimum player count overrides
-//
+
 std::map<uint32, uint8> LoadMinPlayersPerDungeonId(std::string minPlayersString) 
 {
     std::string             delimitedValue;
@@ -2181,7 +2216,7 @@ std::map<uint32, uint8> LoadMinPlayersPerDungeonId(std::string minPlayersString)
     dungeonIdStream.str(minPlayersString);
 
     // Process each dungeon ID in the string, delimited by the comma - "," and then space " "
-    //
+
     while (std::getline(dungeonIdStream, delimitedValue, ',')) 
     {
         std::string       val1;
@@ -2199,7 +2234,7 @@ std::map<uint32, uint8> LoadMinPlayersPerDungeonId(std::string minPlayersString)
 }
 
 // Used for reading the string from the configuration file for per-dungeon stat modifiers
-//
+
 std::map<uint32, AutoBalanceStatModifiers> LoadStatModifierOverrides(std::string dungeonIdString)
 {
     std::string       delimitedValue;
@@ -2210,7 +2245,7 @@ std::map<uint32, AutoBalanceStatModifiers> LoadStatModifierOverrides(std::string
     dungeonIdStream.str(dungeonIdString);
 
     // Process each dungeon ID in the string, delimited by the comma - "," and then space " "
-    //
+
     while (std::getline(dungeonIdStream, delimitedValue, ',')) 
     {
         std::string       val1;
@@ -2384,23 +2419,23 @@ bool ShouldMapBeEnabled(Map* map)
 
 void UpdateMapPlayerStats(Map* map)
 {
-    //
+
     // If this isn't a dungeon instance, just bail out immediately
-    //
+
 
     if (!map->IsDungeon() || !map->GetInstanceId())
         return;
 
-    //
+
     // Get the map's info
-    //
+
 
     AutoBalanceMapInfo* mapABInfo   = GetMapInfo(map);
     InstanceMap*        instanceMap = map->ToInstanceMap();
 
-    //
+
     // Remember some values
-    //
+
 
     uint8 oldPlayerCount         = mapABInfo->playerCount;
     uint8 oldAdjustedPlayerCount = mapABInfo->adjustedPlayerCount;
@@ -2415,10 +2450,13 @@ void UpdateMapPlayerStats(Map* map)
         oldPlayerCount,
         oldAdjustedPlayerCount);
 
-    //
+
     // Update the player count
     // Minimum of 1 to prevent scaling weirdness when only GMs are in the instnace
-    //
+
+
+    // Ensure cached player pointers are still valid for this map instance.
+    PruneMapPlayerList(map, mapABInfo);
 
     mapABInfo->playerCount = mapABInfo->allMapPlayers.size() ? mapABInfo->allMapPlayers.size() : 1;
 
@@ -2437,23 +2475,23 @@ void UpdateMapPlayerStats(Map* map)
 
     uint8 adjustedPlayerCount = 0;
 
-    //
+
     // If combat is locked and the new player count is higher than the combat lock, update the combat lock
-    //
+
 
     if(mapABInfo->combatLocked &&
        mapABInfo->playerCount > oldPlayerCount &&
        mapABInfo->playerCount > mapABInfo->combatLockMinPlayers)
     {
-        //
+
         // Start with the actual player count
-        //
+
 
         adjustedPlayerCount = mapABInfo->playerCount;
 
-        //
+
         // This is the new floor
-        //
+
 
         mapABInfo->combatLockMinPlayers = mapABInfo->playerCount;
 
@@ -2464,14 +2502,14 @@ void UpdateMapPlayerStats(Map* map)
             mapABInfo->combatLockMinPlayers);
 
     }
-    //
+
     // If combat is otherwise locked
-    //
+
     else if (mapABInfo->combatLocked)
     {
-        //
+
         // Start with the saved floor
-        //
+
         adjustedPlayerCount = mapABInfo->combatLockMinPlayers ? mapABInfo->combatLockMinPlayers : mapABInfo->playerCount;
 
         LOG_DEBUG("module.AutoBalance_CombatLocking", "AutoBalance::UpdateMapPlayerStats: Map {} ({}{}) | Combat is locked. Combat floor is ({}).",
@@ -2480,39 +2518,39 @@ void UpdateMapPlayerStats(Map* map)
             instanceMap->GetInstanceId() ? "-" + std::to_string(instanceMap->GetInstanceId()) : "",
             mapABInfo->combatLockMinPlayers);
     }
-    //
+
     // If combat is not locked
-    //
+
     else
     {
-        //
+
         // Start with the actual player count
-        //
+
         adjustedPlayerCount = mapABInfo->playerCount;
     }
 
-    //
+
     // If the adjusted player count is below the min players setting, adjust it
-    //
+
 
     if (adjustedPlayerCount < mapABInfo->minPlayers)
         adjustedPlayerCount = mapABInfo->minPlayers;
 
-    //
+
     // Adjust by the PlayerDifficultyOffset
-    //
+
 
     adjustedPlayerCount += PlayerCountDifficultyOffset;
 
-    //
+
     // Store the adjusted player count in the map's info
-    //
+
 
     mapABInfo->adjustedPlayerCount = adjustedPlayerCount;
 
-    //
+
     // If the adjustedPlayerCount changed, schedule this map for a reconfiguration
-    //
+
 
     if (oldAdjustedPlayerCount != mapABInfo->adjustedPlayerCount)
     {
@@ -2533,15 +2571,15 @@ void UpdateMapPlayerStats(Map* map)
     uint8 highestPlayerLevel = 0;
     uint8 lowestPlayerLevel  = 80;
 
-    //
+
     // Iterate through the players and update the highest and lowest player levels
-    //
+
 
     for (std::vector<Player*>::const_iterator playerIterator = mapABInfo->allMapPlayers.begin(); playerIterator != mapABInfo->allMapPlayers.end(); ++playerIterator)
     {
         Player* thisPlayer = *playerIterator;
 
-        if (thisPlayer && !thisPlayer->IsGameMaster())
+        if (thisPlayer && thisPlayer->IsInWorld() && !thisPlayer->IsGameMaster())
         {
             if (thisPlayer->GetLevel() > highestPlayerLevel || highestPlayerLevel == 0)
                 highestPlayerLevel = thisPlayer->GetLevel();
@@ -2559,9 +2597,9 @@ void UpdateMapPlayerStats(Map* map)
         mapABInfo->highestPlayerLevel = mapABInfo->lfgTargetLevel;
         mapABInfo->lowestPlayerLevel  = mapABInfo->lfgTargetLevel;
 
-        //
+
         // No non-GM players on the map
-        //
+
 
         LOG_DEBUG("module.AutoBalance", "AutoBalance::UpdateMapPlayerStats: Map {} ({}{}, {}-player {}) | has no non-GM players. Player stats derived from LFG target level.",
             map->GetMapName(),
@@ -2604,9 +2642,9 @@ void UpdateMapPlayerStats(Map* map)
 
 void AddPlayerToMap(Map* map, Player* player)
 {
-    //
+
     // Get map data
-    //
+
 
     AutoBalanceMapInfo* mapABInfo = GetMapInfo(map);
 
@@ -2619,9 +2657,9 @@ void AddPlayerToMap(Map* map, Player* player)
             map->GetInstanceId() ? "-" + std::to_string(map->GetInstanceId()) : "");
         return;
     }
-    //
+
     // Player is a GM
-    //
+
     else if (player->IsGameMaster())
     {
         LOG_DEBUG("module.AutoBalance", "AutoBalance::AddPlayerToMap: Map {} ({}{}) | Game Master ({}) will not be added to the player list.",
@@ -2631,66 +2669,63 @@ void AddPlayerToMap(Map* map, Player* player)
             player->GetName());
         return;
     }
-    //
+
     // If this player is already in the map's player list, skip
-    //
+
     else if (std::find(mapABInfo->allMapPlayers.begin(), mapABInfo->allMapPlayers.end(), player) != mapABInfo->allMapPlayers.end())
     {
-        LOG_DEBUG("module.AutoBalance", "AutoBalance::AddPlayerToMap: Player {} ({}) | is already in the map's player list.",
-            player->GetName(),
-            player->GetLevel());
+        LOG_DEBUG("module.AutoBalance", "AutoBalance::AddPlayerToMap: Player {} | is already in the map's player list.",
+            player->GetName());
         return;
     }
 
-    //
+
     // Add the player to the map's player list
-    //
+
 
     mapABInfo->allMapPlayers.push_back(player);
-    LOG_DEBUG("module.AutoBalance", "AutoBalance::AddPlayerToMap: Player {} ({}) | added to the map's player list.", player->GetName(), player->GetLevel());
+    LOG_DEBUG("module.AutoBalance", "AutoBalance::AddPlayerToMap: Player {} | added to the map's player list.", player->GetName());
 
-    //
     // Update the map's player stats
-    //
+
 
     UpdateMapPlayerStats(map);
 }
 
 bool RemovePlayerFromMap(Map* map, Player* player)
 {
-    //
+
     // Get map data
-    //
+
 
     AutoBalanceMapInfo* mapABInfo = GetMapInfo(map);
 
-    //
+
     // If this player isn't in the map's player list, skip
-    //
+
 
     if (std::find(mapABInfo->allMapPlayers.begin(), mapABInfo->allMapPlayers.end(), player) == mapABInfo->allMapPlayers.end())
     {
-        LOG_DEBUG("module.AutoBalance", "AutoBalance::RemovePlayerFromMap: Player {} ({}) | was not in the map's player list.", player->GetName(), player->GetLevel());
+        LOG_DEBUG("module.AutoBalance", "AutoBalance::RemovePlayerFromMap: Player {} | was not in the map's player list.", player->GetName());
         return false;
     }
 
-    //
+
     // Remove the player from the map's player list
-    //
+
 
     mapABInfo->allMapPlayers.erase(std::remove(mapABInfo->allMapPlayers.begin(), mapABInfo->allMapPlayers.end(), player), mapABInfo->allMapPlayers.end());
-    LOG_DEBUG("module.AutoBalance", "AutoBalance::RemovePlayerFromMap: Player {} ({}) | removed from the map's player list.", player->GetName(), player->GetLevel());
+    LOG_DEBUG("module.AutoBalance", "AutoBalance::RemovePlayerFromMap: Player {} | removed from the map's player list.", player->GetName());
 
-    //
     // If the map is combat locked, schedule a map update for when combat ends
-    //
+
 
     if (mapABInfo->combatLocked)
         mapABInfo->combatLockTripped = true;
 
-    //
+
     // Update the map's player stats
-    //
+
 
     UpdateMapPlayerStats(map);
 
@@ -2699,15 +2734,15 @@ bool RemovePlayerFromMap(Map* map, Player* player)
 
 bool UpdateMapDataIfNeeded(Map* map, bool force)
 {
-    //
+
     // Get map data
-    //
+
 
     AutoBalanceMapInfo* mapABInfo = GetMapInfo(map);
 
-    //
+
     // If map needs update
-    //
+
 
     if (force || mapABInfo->globalConfigTime < globalConfigTime || mapABInfo->mapConfigTime < mapABInfo->globalConfigTime)
     {
@@ -2719,9 +2754,9 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
             mapABInfo->globalConfigTime,
             mapABInfo->mapConfigTime);
 
-        //
+
         // Update forced
-        //
+
 
         if (force)
         {
@@ -2732,16 +2767,16 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                 mapABInfo->mapConfigTime);
         }
 
-        //
+
         // Some tracking variables
-        //
+
 
         bool isGlobalConfigOutOfDate = mapABInfo->globalConfigTime < globalConfigTime;
         bool isMapConfigOutOfDate    = mapABInfo->mapConfigTime < globalConfigTime;
 
-        //
+
         // If this was triggered by a global config update, redetect players
-        //
+
 
         if (isGlobalConfigOutOfDate)
         {
@@ -2757,35 +2792,35 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                 map->GetId(),
                 map->GetInstanceId() ? "-" + std::to_string(map->GetInstanceId()) : "");
 
-            //
+
             // Clear the map's player list
-            //
+
 
             mapABInfo->allMapPlayers.clear();
 
-            //
+
             // Reset the combat lock
-            //
+
 
             mapABInfo->combatLockMinPlayers = 0;
 
-            //
+
             // Get the map's player list
-            //
+
 
             Map::PlayerList const& playerList = map->GetPlayers();
 
-            //
+
             // Re-count the players in the dungeon
-            //
+
 
             for (Map::PlayerList::const_iterator playerIteration = playerList.begin(); playerIteration != playerList.end(); ++playerIteration)
             {
                 Player* thisPlayer = playerIteration->GetSource();
 
-                //
+
                 // If the player is in combat, combat lock the map
-                //
+
 
                 if (thisPlayer->IsInCombat())
                 {
@@ -2798,21 +2833,21 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                         thisPlayer->GetName());
                 }
 
-                //
+
                 // (conditionally) add the player to the map's player list
-                //
+
 
                 AddPlayerToMap(map, thisPlayer);
             }
 
-            //
+
             // Map's player count will be updated in UpdateMapPlayerStats below
-            //
+
         }
 
-        //
+
         // Map config is out of date
-        //
+
 
         if (isMapConfigOutOfDate)
         {
@@ -2824,13 +2859,13 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                 globalConfigTime);
         }
 
-        //
+
         // Should the map be enabled?
-        //
+
 
         bool newEnabled = ShouldMapBeEnabled(map);
 
-        //
+
         // If this is a transition between enabled states, reset the map's config time so it will refresh
         ///
 
@@ -2847,17 +2882,17 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                 mapABInfo->mapConfigTime);
         }
 
-        //
+
         // Update the enabled state
-        //
+
 
         mapABInfo->enabled = newEnabled;
 
         if (!mapABInfo->enabled)
         {
-            //
+
             // Mark the config updated to prevent checking the disabled map repeatedly
-            //
+
 
             mapABInfo->globalConfigTime = globalConfigTime;
             mapABInfo->mapConfigTime    = globalConfigTime;
@@ -2868,22 +2903,22 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                 map->GetInstanceId() ? "-" + std::to_string(map->GetInstanceId()) : "");
         }
 
-        //
+
         // Load the map's settings
-        //
+
 
         LoadMapSettings(map);
 
-        //
+
         // Update the map's player stats
-        //
+
 
         UpdateMapPlayerStats(map);
 
-        //
+
         // If LevelScaling is disabled OR if the average creature level is inside the skip range,
         // Set the map level to the average creature level, rounded to the nearest integer
-        //
+
 
         if (!LevelScaling ||
             ((mapABInfo->avgCreatureLevel <= mapABInfo->highestPlayerLevel + mapABInfo->levelScalingSkipHigherLevels && mapABInfo->levelScalingSkipHigherLevels != 0) &&
@@ -2893,9 +2928,9 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
             mapABInfo->mapLevel              = (uint8)(mapABInfo->avgCreatureLevel + 0.5f);
             mapABInfo->isLevelScalingEnabled = false;
 
-            //
+
             // Only log if the mapLevel has changed
-            //
+
 
             if (mapABInfo->prevMapLevel != mapABInfo->mapLevel)
             {
@@ -2910,19 +2945,19 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
             }
 
         }
-        //
+
         // If the average creature level is lower than the highest player level,
         // Set the map level to the average creature level, rounded to the nearest integer
-        //
+
         else if (mapABInfo->avgCreatureLevel <= mapABInfo->highestPlayerLevel)
         {
             mapABInfo->prevMapLevel          = mapABInfo->mapLevel;
             mapABInfo->mapLevel              = (uint8)(mapABInfo->avgCreatureLevel + 0.5f);
             mapABInfo->isLevelScalingEnabled = true;
 
-            //
+
             // Only log if the mapLevel has changed
-            //
+
             if (mapABInfo->prevMapLevel != mapABInfo->mapLevel)
             {
                 LOG_DEBUG("module.AutoBalance", "AutoBalance::UpdateMapDataIfNeeded: Map {} ({}{}, {}-player {}) | Level scaling is enabled. Map level updated ({}{}) (average creature level).",
@@ -2935,18 +2970,18 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
                     mapABInfo->mapLevel);
             }
         }
-        //
+
         // Caps at the highest player level
-        //
+
         else
         {
             mapABInfo->prevMapLevel          = mapABInfo->mapLevel;
             mapABInfo->mapLevel              = mapABInfo->highestPlayerLevel;
             mapABInfo->isLevelScalingEnabled = true;
 
-            //
+
             // Only log if the mapLevel has changed
-            //
+
             if (mapABInfo->prevMapLevel != mapABInfo->mapLevel)
             {
                 LOG_DEBUG("module.AutoBalance", "AutoBalance::UpdateMapDataIfNeeded: Map {} ({}{}, {}-player {}) | Lcaling is enabled. Map level updated ({}{}) (highest player level).",
@@ -2960,25 +2995,25 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
             }
         }
 
-        //
+
         // World multipliers only need to be updated if the mapLevel has changed OR if the map config is out of date
-        //
+
 
         if (mapABInfo->prevMapLevel != mapABInfo->mapLevel || isMapConfigOutOfDate)
         {
-            //
+
             // Update World Health multiplier
             // Used for scaling damage against destructible game objects
-            //
+
 
             World_Multipliers health = getWorldMultiplier(map, BaseValueType::AUTOBALANCE_HEALTH);
 
             mapABInfo->worldHealthMultiplier = health.unscaled;
 
-            //
+
             // Update World Damage or Healing multiplier
             // Used for scaling damage and healing between players and/or non-creatures
-            //
+
 
             World_Multipliers damageHealing               = getWorldMultiplier(map, BaseValueType::AUTOBALANCE_DAMAGE_HEALING);
 
@@ -2986,9 +3021,9 @@ bool UpdateMapDataIfNeeded(Map* map, bool force)
             mapABInfo->scaledWorldDamageHealingMultiplier = damageHealing.scaled;
         }
 
-        //
+
         // Mark the config updated
-        //
+
 
         mapABInfo->globalConfigTime = globalConfigTime;
         mapABInfo->mapConfigTime    = GetCurrentConfigTime();
